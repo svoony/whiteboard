@@ -6,6 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 
 const app = express();
+app.set('trust proxy', 1); // respect X-Forwarded-Proto from Railway/Render
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
