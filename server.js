@@ -9,6 +9,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
+app.set('trust proxy', 1);
 app.use(express.static(path.join(__dirname, 'public')));
 
 const sessions = new Map();
@@ -34,13 +35,12 @@ app.get('/board/:id', (req, res) => {
 });
 
 app.get('/api/qr/:id', async (req, res) => {
-  const proto = req.headers['x-forwarded-proto'] || req.protocol;
-  const host = req.headers['x-forwarded-host'] || req.get('host');
-  const url = `${proto}://${host}/board/${req.params.id}`;
+  const url = `${req.protocol}://${req.get('host')}/board/${req.params.id}`;
   try {
     const qr = await QRCode.toDataURL(url, { width: 220, margin: 1, color: { dark: '#1a1a2e' } });
     res.json({ qr, url });
-  } catch {
+  } catch (err) {
+    console.error('QR error:', err);
     res.status(500).json({ error: 'QR failed' });
   }
 });

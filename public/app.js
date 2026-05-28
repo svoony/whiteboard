@@ -10,22 +10,25 @@ function toast(msg, ms = 2000) {
 
 /* ── state ───────────────────────────────────────────────── */
 const S = {
-  tool: 'pen',
+  tool: 'hand',
   color: '#1a1a2e',
   size: 4,
-  me: null,                // { id, name, color }
+  me: null,
   users: [],
-  elements: [],            // committed strokes + textboxes
-  liveStrokes: new Map(),  // id → { color, width, points[] }  (in-progress)
-  textboxEls: new Map(),   // id → DOM div
-  cursorEls: new Map(),    // userId → DOM div
+  elements: [],
+  liveStrokes: new Map(),
+  textboxEls: new Map(),
+  cursorEls: new Map(),
   drawing: false,
   strokeId: null,
   strokePts: [],
-  offset: { x: 0, y: 0 }, // pan
+  offset: { x: 0, y: 0 },
+  scale: 1,
   spaceDown: false,
   panStart: null,
   offsetStart: null,
+  lastPinchDist: null,
+  lastPinchMid: null,
   dpr: window.devicePixelRatio || 1,
 };
 
@@ -56,7 +59,7 @@ function drawStroke(c, pts, color, width) {
   c.lineWidth = width;
   c.lineCap = 'round';
   c.lineJoin = 'round';
-  c.globalCompositeOperation = (color === '#ffffff') ? 'destination-out' : 'source-over';
+  c.globalCompositeOperation = color === '#ffffff' ? 'destination-out' : 'source-over';
   c.beginPath();
   c.moveTo(pts[0].x, pts[0].y);
   for (let i = 1; i < pts.length - 1; i++) {
@@ -73,39 +76,54 @@ function drawStroke(c, pts, color, width) {
 function render() {
   const w = canvas.width / S.dpr, h = canvas.height / S.dpr;
   ctx.clearRect(0, 0, w, h);
-
-  // white background
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, w, h);
 
   ctx.save();
   ctx.translate(S.offset.x, S.offset.y);
+  ctx.scale(S.scale, S.scale);
 
-  // committed strokes
   for (const el of S.elements) {
     if (el.type === 'stroke') drawStroke(ctx, el.points, el.color, el.width);
   }
-
-  // live / in-progress strokes
   for (const [, stroke] of S.liveStrokes) {
     drawStroke(ctx, stroke.points, stroke.color, stroke.width);
   }
 
   ctx.restore();
-
-  // reposition text boxes and cursors to match pan
   positionTextboxes();
   positionCursors();
 }
 
-/* ── screen ↔ world coords ───────────────────────────────── */
+/* ── coord transforms ────────────────────────────────────── */
 function toWorld(sx, sy) {
   const r = canvas.getBoundingClientRect();
-  return { x: sx - r.left - S.offset.x, y: sy - r.top - S.offset.y };
+  return {
+    x: (sx - r.left - S.offset.x) / S.scale,
+    y: (sy - r.top - S.offset.y) / S.scale,
+  };
 }
 function toScreen(wx, wy) {
-  return { x: wx + S.offset.x, y: wy + S.offset.y };
+  return { x: wx * S.scale + S.offset.x, y: wy * S.scale + S.offset.y };
 }
+
+/* ── zoom ────────────────────────────────────────────────── */
+function applyZoom(factor, cx, cy) {
+  const r = canvas.getBoundingClientRect();
+  const mx = cx - r.left, my = cy - r.top;
+  const newScale = Math.min(8, Math.max(0.1, S.scale * factor));
+  const ratio = newScale / S.scale;
+  S.offset.x = mx - ratio * (mx - S.offset.x);
+  S.offset.y = my - ratio * (my - S.offset.y);
+  S.scale = newScale;
+  render();
+}
+
+wrap.addEventListener('wheel', e => {
+  e.preventDefault();
+  const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+  applyZoom(factor, e.clientX, e.clientY);
+}, { passive: false });
 
 /* ── textboxes ───────────────────────────────────────────── */
 function positionTextboxes() {
@@ -115,6 +133,8 @@ function positionTextboxes() {
     const sc = toScreen(el.x, el.y);
     div.style.left = sc.x + 'px';
     div.style.top = sc.y + 'px';
+    div.style.transform = `scale(${S.scale})`;
+    div.style.transformOrigin = 'top left';
   }
 }
 
@@ -131,21 +151,20 @@ function createTextboxDOM(el, editable = false) {
   const sc = toScreen(el.x, el.y);
   div.style.left = sc.x + 'px';
   div.style.top = sc.y + 'px';
+  div.style.transform = `scale(${S.scale})`;
+  div.style.transformOrigin = 'top left';
 
-  // editing events (only for own boxes)
   if (editable) {
     let dragOff = null;
-    // move on mousedown background area
     div.addEventListener('mousedown', e => {
-      if (e.target !== div) return; // clicking inside text - let browser handle
+      if (e.target !== div) return;
       dragOff = { sx: e.clientX, sy: e.clientY, ox: el.x, oy: el.y };
       e.preventDefault();
     });
     window.addEventListener('mousemove', e => {
       if (!dragOff) return;
-      const r = canvas.getBoundingClientRect();
-      el.x = dragOff.ox + (e.clientX - dragOff.sx);
-      el.y = dragOff.oy + (e.clientY - dragOff.sy);
+      el.x = dragOff.ox + (e.clientX - dragOff.sx) / S.scale;
+      el.y = dragOff.oy + (e.clientY - dragOff.sy) / S.scale;
       positionTextboxes();
       socket.emit('textbox-update', { id: el.id, text: el.text, x: el.x, y: el.y });
     });
@@ -156,14 +175,12 @@ function createTextboxDOM(el, editable = false) {
       socket.emit('textbox-update', { id: el.id, text: el.text, x: el.x, y: el.y });
     });
 
-    // dbl-click to delete
     div.addEventListener('dblclick', () => {
       if (!confirm('Delete this text box?')) return;
       socket.emit('textbox-delete', { id: el.id });
       removeTextbox(el.id);
     });
 
-    // focus immediately
     setTimeout(() => { div.focus(); placeCaretAtEnd(div); }, 50);
   }
 
@@ -190,10 +207,10 @@ function removeTextbox(id) {
 
 /* ── cursors ─────────────────────────────────────────────── */
 function positionCursors() {
-  for (const [uid, { el, wx, wy }] of S.cursorEls) {
-    const sc = toScreen(wx, wy);
-    el.style.left = sc.x + 'px';
-    el.style.top = sc.y + 'px';
+  for (const [, data] of S.cursorEls) {
+    const sc = toScreen(data.wx, data.wy);
+    data.el.style.left = sc.x + 'px';
+    data.el.style.top = sc.y + 'px';
   }
 }
 
@@ -211,8 +228,7 @@ function setCursor(userId, name, color, wx, wy) {
     data = { el, wx: 0, wy: 0 };
     S.cursorEls.set(userId, data);
   }
-  data.wx = wx;
-  data.wy = wy;
+  data.wx = wx; data.wy = wy;
   const sc = toScreen(wx, wy);
   data.el.style.left = sc.x + 'px';
   data.el.style.top = sc.y + 'px';
@@ -227,7 +243,6 @@ function removeCursor(userId) {
 function updateLobby(users) {
   S.users = users;
   const container = document.getElementById('lobby-avatars');
-  const count = document.getElementById('lobby-count');
   container.innerHTML = '';
   for (const u of users) {
     const av = document.createElement('div');
@@ -237,18 +252,18 @@ function updateLobby(users) {
     av.title = u.name;
     container.appendChild(av);
   }
-  count.textContent = users.length + (users.length === 1 ? ' online' : ' online');
+  document.getElementById('lobby-count').textContent = users.length + ' online';
 }
 
-/* ── mouse / touch events ────────────────────────────────── */
+/* ── pinch helpers ───────────────────────────────────────── */
+function pinchDist(t) { return Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY); }
+function pinchMid(t) { return { x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 }; }
+
+/* ── pointer events ──────────────────────────────────────── */
 function getPos(e) {
-  if (e.touches) {
-    return { x: e.touches[0].clientX, y: e.touches[0].clientY };
-  }
-  return { x: e.clientX, y: e.clientY };
+  return e.touches ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : { x: e.clientX, y: e.clientY };
 }
 
-// throttle cursor emit
 let lastCursorEmit = 0;
 function emitCursor(wx, wy) {
   const now = Date.now();
@@ -265,13 +280,20 @@ window.addEventListener('mouseup', onPointerUp);
 window.addEventListener('touchend', onPointerUp);
 
 function onPointerDown(e) {
-  if (e.touches && e.touches.length > 1) return; // ignore multi-touch for now
+  if (e.touches && e.touches.length === 2) {
+    S.lastPinchDist = pinchDist(e.touches);
+    S.lastPinchMid = pinchMid(e.touches);
+    S.drawing = false;
+    e.preventDefault();
+    return;
+  }
+  if (e.touches && e.touches.length > 2) return;
   e.preventDefault();
 
   const { x: sx, y: sy } = getPos(e);
+  const isPan = S.tool === 'hand' || S.spaceDown || e.button === 1;
 
-  // panning: space+drag or middle mouse
-  if (S.spaceDown || e.button === 1) {
+  if (isPan) {
     S.panStart = { x: sx, y: sy };
     S.offsetStart = { ...S.offset };
     wrap.classList.add('panning');
@@ -303,10 +325,24 @@ function onPointerDown(e) {
 }
 
 function onPointerMove(e) {
+  if (e.touches && e.touches.length === 2) {
+    e.preventDefault();
+    const dist = pinchDist(e.touches);
+    const mid = pinchMid(e.touches);
+    if (S.lastPinchDist) {
+      applyZoom(dist / S.lastPinchDist, mid.x, mid.y);
+      S.offset.x += mid.x - S.lastPinchMid.x;
+      S.offset.y += mid.y - S.lastPinchMid.y;
+      render();
+    }
+    S.lastPinchDist = dist;
+    S.lastPinchMid = mid;
+    return;
+  }
+
   if (e.touches) e.preventDefault();
   const { x: sx, y: sy } = getPos(e);
 
-  // panning
   if (S.panStart) {
     S.offset.x = S.offsetStart.x + (sx - S.panStart.x);
     S.offset.y = S.offsetStart.y + (sy - S.panStart.y);
@@ -318,7 +354,6 @@ function onPointerMove(e) {
   emitCursor(wp.x, wp.y);
 
   if (!S.drawing) return;
-
   S.strokePts.push(wp);
   const stroke = S.liveStrokes.get(S.strokeId);
   if (stroke) stroke.points = S.strokePts;
@@ -326,15 +361,17 @@ function onPointerMove(e) {
   render();
 }
 
-function onPointerUp() {
-  // end pan
+function onPointerUp(e) {
+  if (e && e.touches !== undefined && e.touches.length < 2) {
+    S.lastPinchDist = null;
+    S.lastPinchMid = null;
+  }
   if (S.panStart) {
     S.panStart = null;
     S.offsetStart = null;
     wrap.classList.remove('panning');
     return;
   }
-
   if (!S.drawing) return;
   S.drawing = false;
 
@@ -344,8 +381,6 @@ function onPointerUp() {
     render();
     return;
   }
-
-  // commit
   const committed = { type: 'stroke', id: S.strokeId, userId: S.me?.id, color: stroke.color, width: stroke.width, points: stroke.points };
   S.elements.push(committed);
   S.liveStrokes.delete(S.strokeId);
@@ -355,25 +390,21 @@ function onPointerUp() {
 
 /* ── keyboard ────────────────────────────────────────────── */
 window.addEventListener('keydown', e => {
-  if (e.code === 'Space' && document.activeElement.tagName !== 'INPUT' && !document.querySelector('.textbox:focus')) {
-    e.preventDefault();
-    S.spaceDown = true;
-    wrap.style.cursor = 'grab';
+  const inText = document.activeElement?.isContentEditable || document.activeElement?.tagName === 'INPUT';
+  if (inText) return;
+
+  if (e.code === 'Space') { e.preventDefault(); S.spaceDown = true; if (S.tool !== 'hand') wrap.style.cursor = 'grab'; }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); socket.emit('undo'); }
+  if (!e.ctrlKey && !e.metaKey) {
+    if (e.key === 'h' || e.key === 'H') setTool('hand');
+    if (e.key === 'p' || e.key === 'P') setTool('pen');
+    if (e.key === 'e' || e.key === 'E') setTool('eraser');
+    if (e.key === 't' || e.key === 'T') setTool('text');
+    if (e.key === 'Escape') setTool('hand');
   }
-  if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
-    e.preventDefault();
-    socket.emit('undo');
-  }
-  if (e.key === 'p' || e.key === 'P') setTool('pen');
-  if (e.key === 'e' || e.key === 'E') setTool('eraser');
-  if (e.key === 't' || e.key === 'T') setTool('text');
 });
 window.addEventListener('keyup', e => {
-  if (e.code === 'Space') {
-    S.spaceDown = false;
-    wrap.style.cursor = '';
-    setToolCursor();
-  }
+  if (e.code === 'Space') { S.spaceDown = false; wrap.style.cursor = ''; setToolCursor(); }
 });
 
 /* ── toolbar ─────────────────────────────────────────────── */
@@ -384,56 +415,45 @@ function setTool(t) {
 }
 
 function setToolCursor() {
-  wrap.classList.remove('tool-text', 'tool-eraser');
-  if (S.tool === 'text') wrap.classList.add('tool-text');
-  if (S.tool === 'eraser') wrap.classList.add('tool-eraser');
+  wrap.classList.remove('tool-hand', 'tool-pen', 'tool-eraser', 'tool-text');
+  wrap.classList.add('tool-' + S.tool);
 }
 
 document.querySelectorAll('.tool-btn[data-tool]').forEach(btn => {
-  btn.addEventListener('click', () => setTool(btn.dataset.tool));
+  btn.addEventListener('click', () => {
+    if (S.tool === btn.dataset.tool && btn.dataset.tool !== 'hand') {
+      setTool('hand');
+    } else {
+      setTool(btn.dataset.tool);
+    }
+  });
 });
 
-// color
 const colorBtn = document.getElementById('color-btn');
 const colorInput = document.getElementById('color-input');
 colorBtn.addEventListener('click', () => colorInput.click());
-colorInput.addEventListener('input', () => {
-  S.color = colorInput.value;
-  colorBtn.style.background = S.color;
-});
+colorInput.addEventListener('input', () => { S.color = colorInput.value; colorBtn.style.background = S.color; });
 
-// size
-const sizeSlider = document.getElementById('size-slider');
-sizeSlider.addEventListener('input', () => { S.size = +sizeSlider.value; });
-
-// undo
+document.getElementById('size-slider').addEventListener('input', e => { S.size = +e.target.value; });
 document.getElementById('btn-undo').addEventListener('click', () => socket.emit('undo'));
-
-// clear
 document.getElementById('btn-clear').addEventListener('click', () => {
   if (!confirm('Clear the entire board for everyone?')) return;
   socket.emit('clear');
 });
 
-// share
 document.getElementById('btn-share').addEventListener('click', openShare);
-document.getElementById('close-share-btn').addEventListener('click', () => {
-  document.getElementById('share-modal').classList.remove('open');
-});
+document.getElementById('close-share-btn').addEventListener('click', () => document.getElementById('share-modal').classList.remove('open'));
 document.getElementById('share-modal').addEventListener('click', e => {
-  if (e.target === document.getElementById('share-modal'))
-    document.getElementById('share-modal').classList.remove('open');
+  if (e.target === document.getElementById('share-modal')) document.getElementById('share-modal').classList.remove('open');
 });
 document.getElementById('copy-btn').addEventListener('click', () => {
-  const url = document.getElementById('share-url').value;
-  navigator.clipboard.writeText(url).then(() => toast('Link copied!'));
+  navigator.clipboard.writeText(document.getElementById('share-url').value).then(() => toast('Link copied!'));
 });
 document.getElementById('share-url').addEventListener('click', e => e.target.select());
 
 async function openShare() {
   const sessionId = location.pathname.split('/').pop();
-  const modal = document.getElementById('share-modal');
-  modal.classList.add('open');
+  document.getElementById('share-modal').classList.add('open');
   try {
     const res = await fetch(`/api/qr/${sessionId}`);
     const data = await res.json();
@@ -449,29 +469,18 @@ const socket = io();
 
 socket.on('init', ({ me, elements, users }) => {
   S.me = me;
-
-  // load existing elements
   for (const el of elements) {
     S.elements.push(el);
-    if (el.type === 'textbox') {
-      const isMine = el.userId === me.id;
-      createTextboxDOM(el, isMine);
-    }
+    if (el.type === 'textbox') createTextboxDOM(el, el.userId === me.id);
   }
-
   updateLobby(users);
   render();
 });
 
 socket.on('users', updateLobby);
-
 socket.on('user-joined', u => toast(`${u.name} joined`));
+socket.on('user-left', ({ id }) => removeCursor(id));
 
-socket.on('user-left', ({ id }) => {
-  removeCursor(id);
-});
-
-// strokes
 socket.on('stroke-start', data => {
   S.liveStrokes.set(data.id, { color: data.color, width: data.width, points: data.points || [] });
 });
@@ -486,9 +495,8 @@ socket.on('stroke-end', data => {
   render();
 });
 
-// textboxes
 socket.on('textbox-add', el => {
-  if (S.textboxEls.has(el.id)) return; // already created (own)
+  if (S.textboxEls.has(el.id)) return;
   S.elements.push(el);
   createTextboxDOM(el, false);
 });
@@ -496,18 +504,13 @@ socket.on('textbox-update', data => {
   const el = S.elements.find(e => e.id === data.id);
   if (el) { el.text = data.text; el.x = data.x; el.y = data.y; }
   const div = S.textboxEls.get(data.id);
-  if (div && document.activeElement !== div) {
-    div.innerText = data.text;
-    positionTextboxes();
-  }
+  if (div && document.activeElement !== div) { div.innerText = data.text; positionTextboxes(); }
 });
 socket.on('textbox-delete', ({ id }) => removeTextbox(id));
 
-// clear / undo
 socket.on('clear', () => {
-  S.elements = [];
-  S.liveStrokes.clear();
-  for (const [id, div] of S.textboxEls) div.remove();
+  S.elements = []; S.liveStrokes.clear();
+  for (const [, div] of S.textboxEls) div.remove();
   S.textboxEls.clear();
   render();
 });
@@ -517,28 +520,25 @@ socket.on('remove-element', ({ id }) => {
   render();
 });
 
-// cursors
 socket.on('cursor', ({ userId, name, color, x, y }) => {
   if (userId !== socket.id) setCursor(userId, name, color, x, y);
 });
 socket.on('cursor-remove', ({ userId }) => removeCursor(userId));
 
 /* ── join flow ───────────────────────────────────────────── */
-const joinOverlay = document.getElementById('join-overlay');
 const nameInput = document.getElementById('name-input');
-const joinBtn = document.getElementById('join-btn');
 
 function doJoin() {
   const name = nameInput.value.trim() || 'Anonymous';
   const sessionId = location.pathname.split('/').pop();
-  joinOverlay.style.display = 'none';
+  document.getElementById('join-overlay').style.display = 'none';
   document.getElementById('app').classList.add('ready');
   resizeCanvas();
   socket.emit('join', { sessionId, name });
 }
 
-joinBtn.addEventListener('click', doJoin);
+document.getElementById('join-btn').addEventListener('click', doJoin);
 nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') doJoin(); });
-
-// auto-focus name input
 nameInput.focus();
+
+setTool('hand');
