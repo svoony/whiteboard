@@ -37,7 +37,8 @@ app.get('/board/:id', (req, res) => {
 app.get('/api/qr/:id', async (req, res) => {
   const url = `${req.protocol}://${req.get('host')}/board/${req.params.id}`;
   try {
-    const qr = await QRCode.toDataURL(url, { width: 220, margin: 1, color: { dark: '#1a1a2e' } });
+    const svg = await QRCode.toString(url, { type: 'svg', width: 220, margin: 1 });
+    const qr = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
     res.json({ qr, url });
   } catch (err) {
     console.error('QR error:', err);
