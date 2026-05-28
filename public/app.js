@@ -59,7 +59,7 @@ function drawStroke(c, pts, color, width) {
   c.lineWidth = width;
   c.lineCap = 'round';
   c.lineJoin = 'round';
-  c.globalCompositeOperation = color === '#ffffff' ? 'destination-out' : 'source-over';
+  c.globalCompositeOperation = 'source-over';
   c.beginPath();
   c.moveTo(pts[0].x, pts[0].y);
   for (let i = 1; i < pts.length - 1; i++) {
@@ -76,8 +76,6 @@ function drawStroke(c, pts, color, width) {
 function render() {
   const w = canvas.width / S.dpr, h = canvas.height / S.dpr;
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, w, h);
 
   ctx.save();
   ctx.translate(S.offset.x, S.offset.y);
